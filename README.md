@@ -1,5 +1,6 @@
 # stats_research
 
+```
 $ python train.py
 Epoch [10/100], Loss: 0.5519
 Epoch [20/100], Loss: 0.1387
@@ -13,3 +14,5 @@ Epoch [90/100], Loss: -12818.9297
 Epoch [100/100], Loss: -39471.8555
 
 Test Accuracy: 49.00%
+
+```
