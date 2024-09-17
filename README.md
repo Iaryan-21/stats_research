@@ -1,5 +1,5 @@
 # stats_research
-
+## OUTPUT 
 ```
 $ python train.py
 Epoch [10/100], Loss: 0.5519
