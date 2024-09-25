@@ -4,64 +4,52 @@ import torch.optim as optim
 import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from sklearn.decomposition import PCA
-from model import NeuralNet, create_graph_laplacian, manifold_regularization
+from sklearn import datasets
 import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+from model import NeuralNet, create_graph_laplacian, manifold_regularization
 
-# Set random seed for reproducibility
+device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
 torch.manual_seed(42)
 np.random.seed(42)
 
-# Define the device
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+def generate_torus(n_samples=1000, noise=0.05):
+    t, p = np.random.uniform(0,2*np.pi,(2,n_samples))
+    x = (1+0.5*np.cos(p))*np.cos(t)
+    y = (1+0.5*np.cos(p))*np.sin(t)
+    z = 0.5*np.sin(p)
+    data = np.stack((x,y,z), axis=-1) + np.random.normal(0,noise,(n_samples,3))
+    labels = (np.cos(t) > 0).astype(int)
+    return data, labels
 
-# Data generation
-n_samples = 40000  
-n_features = 10 
+def generate_swiss_roll(n_samples=1000, noise=0.05):
+    data, color = datasets.make_swiss_roll(n_samples=n_samples, noise=noise)
+    labels = (color > np.median(color)).astype(int)
+    return data, labels
 
-X_class_0 = np.random.rand(n_samples // 2, n_features) + np.array([-2] * n_features)
-X_class_1 = np.random.rand(n_samples // 2, n_features) + np.array([2] * n_features)
-X = np.vstack((X_class_0, X_class_1))
-y = np.hstack((np.zeros(n_samples // 2), np.ones(n_samples // 2)))
-shuffle_indices = np.random.permutation(n_samples)
-X = X[shuffle_indices]
-y = y[shuffle_indices]
+def generate_data(manifold_type, n_samples=1000):
+    return {'torus': generate_torus, 'swiss_roll': generate_swiss_roll}[manifold_type](n_samples)
 
-# Split the data
+manifold_type = 'torus'
+X, y = generate_data(manifold_type, n_samples=1500)
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-# Standardize the features
 scaler = StandardScaler()
 X_train = scaler.fit_transform(X_train)
 X_test = scaler.transform(X_test)
 
-# Convert to PyTorch tensors and move to device
-X_train = torch.FloatTensor(X_train).to(device)
-y_train = torch.LongTensor(y_train).to(device)
-X_test = torch.FloatTensor(X_test).to(device)
-y_test = torch.LongTensor(y_test).to(device)
+X_train, y_train = torch.FloatTensor(X_train).to(device), torch.LongTensor(y_train).to(device)
+X_test, y_test = torch.FloatTensor(X_test).to(device), torch.LongTensor(y_test).to(device)
 
-# Model parameters
-input_size = X_train.shape[1]
-hidden_size = 64
-num_classes = 2
-
-# Initialize the model and move to device
-model = NeuralNet(input_size=10, hidden_size=128, num_classes=2).to(device)
-
-# Loss and optimizer
+model = NeuralNet(input_size=X_train.shape[1], hidden_size=64, num_classes=2).to(device)
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=0.0001, weight_decay=1e-4)
+optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
 
-# Create graph Laplacian and move to device
-graph_laplacian = create_graph_laplacian(X_train.cpu().numpy())  # Create Laplacian from CPU data
-graph_laplacian = torch.FloatTensor(graph_laplacian).to(device)  # Move to GPU
+graph_laplacian = torch.FloatTensor(create_graph_laplacian(X_train.cpu().numpy())).to(device)
+graph_laplacian.requires_grad_(True)
 
-# Training parameters
-num_epochs = 10000  # Increased number of epochs
-gamma = 0.001  # Adjusted manifold regularization strength
+num_epochs, gamma = 1000, 0.0001
 
-# Training loop
 for epoch in range(num_epochs):
     model.train()
     optimizer.zero_grad()
@@ -69,25 +57,36 @@ for epoch in range(num_epochs):
     outputs = model(X_train)
     classification_loss = criterion(outputs, y_train)
     manifold_loss = manifold_regularization(outputs, graph_laplacian, gamma)
-    total_loss = classification_loss + manifold_loss
     
+    total_loss = classification_loss + manifold_loss
     total_loss.backward()
+    if epoch % 100 == 0:
+        print(f"Epoch {epoch}")
+        print(f"Classification Loss: {classification_loss.item():.4f}")
+        print(f"Manifold Loss: {manifold_loss.item():.4f}")
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                print(f"Gradient for {name}: {param.grad.abs().mean():.4f}")
+            else:
+                print(f"No gradient for {name}")
+        if graph_laplacian.grad is not None:
+            print(f"Gradient for graph_laplacian: {graph_laplacian.grad.abs().mean():.4f}")
+        else:
+            print("No gradient for graph_laplacian")
+    
     optimizer.step()
     
-    if (epoch + 1) % 50 == 0:  
+    if (epoch + 1) % 50 == 0:
         model.eval()
         with torch.no_grad():
             test_outputs = model(X_test)
             _, predicted = torch.max(test_outputs.data, 1)
             accuracy = (predicted == y_test).float().mean()
-        
-        print(f'Epoch [{epoch+1}/{num_epochs}], '
-              f'Classification Loss: {classification_loss.item():.4f}, '
-              f'Manifold Loss: {manifold_loss.item():.4f}, '
-              f'Total Loss: {total_loss.item():.4f}, '
+        print(f'Epoch [{epoch+1}/{num_epochs}], Class. Loss: {classification_loss.item():.4f}, '
+              f'Manifold Loss: {manifold_loss.item():.4f}, Total Loss: {total_loss.item():.4f}, '
               f'Test Accuracy: {accuracy.item():.4f}')
 
-# Final evaluation
+
 model.eval()
 with torch.no_grad():
     outputs = model(X_test)
@@ -95,48 +94,37 @@ with torch.no_grad():
     accuracy = (predicted == y_test).float().mean()
     print(f'Final Test Accuracy: {accuracy.item():.4f}')
 
-# Visualization
-def plot_decision_boundary(X, y, model, pca=None):
-    # Ensure X and y are numpy arrays
-    X = X.detach().cpu().numpy() if isinstance(X, torch.Tensor) else X
-    y = y.detach().cpu().numpy() if isinstance(y, torch.Tensor) else y
-
-    # Create a mesh grid
-    x_min, x_max = X[:, 0].min() - 0.5, X[:, 0].max() + 0.5
-    y_min, y_max = X[:, 1].min() - 0.5, X[:, 1].max() + 0.5
-    xx, yy = np.meshgrid(np.arange(x_min, x_max, 0.02),
-                         np.arange(y_min, y_max, 0.02))
+def plot_decision_boundary(X, y, model, device, manifold_type):
+    x_min, x_max = X[:,0].min()-0.5,X[:,0].max()+0.5
+    y_min, y_max = X[:,1].min()-0.5,X[:,1].max()+0.5
+    z_min, z_max = X[:,2].min()-0.5,X[:,2].max()+0.5
     
-    # Flatten the mesh grid points
-    mesh_points = np.c_[xx.ravel(), yy.ravel()]
+    grid_size = 20
+    xx, yy, zz = np.meshgrid(np.linspace(x_min, x_max, grid_size),
+                             np.linspace(y_min, y_max, grid_size),
+                             np.linspace(z_min, z_max, grid_size))
     
-    # If PCA was used, inverse transform the mesh points
-    if pca is not None:
-        mesh_points = pca.inverse_transform(mesh_points)
-    
-    # Convert to PyTorch tensor and ensure it's float32
-    mesh_tensor = torch.FloatTensor(mesh_points.astype(np.float32)).to(device)
-    
-    # Get predictions
-    model.eval()  # Set the model to evaluation mode
+    mesh_points = np.c_[xx.ravel(), yy.ravel(), zz.ravel()]
+    mesh_tensor = torch.FloatTensor(scaler.transform(mesh_points).astype(np.float32)).to(device)
+    model.eval()
     with torch.no_grad():
-        Z = model(mesh_tensor)
-        Z = torch.argmax(Z, dim=1).cpu().numpy()
+        Z = torch.argmax(model(mesh_tensor), dim=1).cpu().numpy().reshape(xx.shape)
     
-    # Reshape the predictions
-    Z = Z.reshape(xx.shape)
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+    scatter = ax.scatter(X[:, 0], X[:, 1], X[:, 2], c=y, cmap=plt.cm.RdYlBu, edgecolor='black', s=30)
+    ax.contourf(xx[:,:,0], yy[:,:,0], Z[:,:,10], zdir='z', offset=z_min, cmap=plt.cm.RdYlBu, alpha=0.5)
+    ax.contourf(xx[:,0,:], Z[:,10,:], zz[:,0,:], zdir='y', offset=y_max, cmap=plt.cm.RdYlBu, alpha=0.5)
+    ax.contourf(Z[10,:,:], yy[0,:,:], zz[0,:,:], zdir='x', offset=x_min, cmap=plt.cm.RdYlBu, alpha=0.5)
     
-    # Plot
-    plt.figure(figsize=(10, 8))
-    plt.contourf(xx, yy, Z, alpha=0.8, cmap=plt.cm.RdYlBu)
-    plt.scatter(X[:, 0], X[:, 1], c=y, cmap=plt.cm.RdYlBu, edgecolor='black')
-    plt.xlabel('Feature 1')
-    plt.ylabel('Feature 2')
-    plt.title('Decision Boundary')
-    plt.colorbar()
+    ax.set_xlabel('Feature 1')
+    ax.set_ylabel('Feature 2')
+    ax.set_zlabel('Feature 3')
+    ax.set_title(f'{manifold_type.capitalize()} with Decision Boundary')
+    
+
+    plt.colorbar(scatter, ax=ax, label='Class')
+    plt.tight_layout()
     plt.show()
 
-# Usage in your main script:
-pca = PCA(n_components=2)
-X_train_2d = pca.fit_transform(X_train.cpu())  # Move back to CPU for PCA and plotting
-plot_decision_boundary(X_train_2d, y_train.cpu(), model, pca)
+plot_decision_boundary(X, y, model, device, manifold_type)
